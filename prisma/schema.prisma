@@ -1,0 +1,55 @@
+// Prisma schema for Assignment Evaluation Platform
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String
+  role      String   // "student" | "instructor"
+  createdAt DateTime @default(now())
+  submissions Submission[]
+  assignments Assignment[] // instructors create assignments
+}
+
+model Assignment {
+  id          String   @id @default(cuid())
+  title       String
+  description String
+  dueDate     DateTime?
+  maxScore    Int      @default(100)
+  createdById String
+  createdAt   DateTime @default(now())
+  creator     User     @relation(fields: [createdById], references: [id])
+  submissions Submission[]
+}
+
+model Submission {
+  id           String   @id @default(cuid())
+  assignmentId String
+  studentId    String
+  content      String   // Text content (from text input or extracted from PDF)
+  fileUrl      String?  // Optional: path to uploaded file
+  status       String   @default("submitted") // "submitted" | "evaluated"
+  submittedAt  DateTime @default(now())
+  assignment   Assignment @relation(fields: [assignmentId], references: [id])
+  student      User     @relation(fields: [studentId], references: [id])
+  feedback     Feedback?
+}
+
+model Feedback {
+  id             String   @id @default(cuid())
+  submissionId   String   @unique
+  score          Int
+  plagiarismRisk Int      // 0-100 percentage
+  feedbackSummary String
+  detailedFeedback String?
+  evaluatedAt    DateTime @default(now())
+  submission     Submission @relation(fields: [submissionId], references: [id])
+}
