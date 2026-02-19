@@ -1,100 +1,173 @@
 /**
  * TF-IDF + Cosine Similarity for Plagiarism Detection
- * Compares submission against other submissions to flag plagiarism risk
+ * Compares a new submission against others to estimate plagiarism risk
  */
 
-// Tokenize text into words (lowercase, remove punctuation)
+// Tokenize: lowercase, remove punctuation, filter very short words
 function tokenize(text: string): string[] {
+  if (typeof text !== 'string' || !text.trim()) return [];
+  
   return text
     .toLowerCase()
-    .replace(/[^\w\s]/g, " ")
+    .replace(/[^\w\s]/g, ' ')
     .split(/\s+/)
-    .filter((w) => w.length > 1);
+    .filter(word => word.length > 1);
 }
 
-// Compute term frequency
-function termFrequency(tokens: string[]): Map<string, number> {
-  const tf = new Map<string, number>();
+// Term Frequency - normalized (using plain object instead of Map → safer)
+function termFrequency(tokens: string[]): Record<string, number> {
+  const tf: Record<string, number> = {};
+
+  if (tokens.length === 0) return tf;
+
+  // Count
   for (const token of tokens) {
-    tf.set(token, (tf.get(token) ?? 0) + 1);
+    tf[token] = (tf[token] ?? 0) + 1;
   }
-  const len = tokens.length;
-  for (const [term, count] of tf) {
-    tf.set(term, count / len);
+
+  // Normalize
+  const docLength = tokens.length;
+  for (const term in tf) {
+    tf[term] /= docLength;
   }
+
   return tf;
 }
 
-// Compute IDF for terms across documents
-function inverseDocumentFrequency(
-  documents: string[][],
-  term: string
-): number {
-  const docsContaining = documents.filter((doc) =>
-    doc.some((t) => t.toLowerCase() === term.toLowerCase())
-  ).length;
-  return Math.log((documents.length + 1) / (docsContaining + 1)) + 1;
+// Smoothed Inverse Document Frequency
+function inverseDocumentFrequency(docs: string[][], term: string): number {
+  let count = 0;
+  for (const doc of docs) {
+    if (doc.includes(term)) {
+      count++;
+    }
+  }
+  // +1 smoothing avoids division by zero and extreme values
+  return Math.log((docs.length + 1) / (count + 1)) + 1;
 }
 
-// TF-IDF vector for a document
+// Build sorted vocabulary (consistency across runs / cold starts)
+function buildVocabulary(allDocs: string[][]): string[] {
+  const vocab = new Set<string>();
+  for (const doc of allDocs) {
+    for (const token of doc) {
+      vocab.add(token);
+    }
+  }
+  // Sort → guarantees same vector shape every time
+  return Array.from(vocab).sort();
+}
+
+// Create TF-IDF vector using sorted vocabulary
 function tfidfVector(
   tokens: string[],
   allDocs: string[][],
-  vocabulary: Set<string>
+  sortedVocab: string[]
 ): number[] {
   const tf = termFrequency(tokens);
-  const vec: number[] = [];
-  for (const term of vocabulary) {
-    const tfVal = tf.get(term) ?? 0;
-    const idfVal = inverseDocumentFrequency(allDocs, term);
-    vec.push(tfVal * idfVal);
-  }
-  return vec;
+  
+  return sortedVocab.map(term => {
+    const tfValue = tf[term] ?? 0;
+    const idfValue = inverseDocumentFrequency(allDocs, term);
+    return tfValue * idfValue;
+  });
 }
 
-// Cosine similarity between two vectors
+// Cosine similarity between two equal-length vectors
 function cosineSimilarity(a: number[], b: number[]): number {
-  if (a.length !== b.length) return 0;
-  let dot = 0,
-    normA = 0,
-    normB = 0;
+  if (a.length !== b.length || a.length === 0) return 0;
+
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+
   for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
+    dotProduct += a[i] * b[i];
+    normA += a[i] ** 2;
+    normB += b[i] ** 2;
   }
-  const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  return denom === 0 ? 0 : dot / denom;
+
+  const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+  return denominator > 1e-12 ? dotProduct / denominator : 0;
 }
 
 /**
- * Compute plagiarism risk (0-100) for a new submission
- * by comparing against all other submissions for the same assignment
+ * Main function: Compute plagiarism risk score (0–100)
+ * Returns the highest similarity × 100, rounded
  */
 export function computePlagiarismRisk(
   newSubmissionText: string,
   otherSubmissions: string[]
 ): number {
-  if (otherSubmissions.length === 0) return 0;
+  if (!otherSubmissions?.length) return 0;
+  if (typeof newSubmissionText !== 'string' || !newSubmissionText.trim()) return 0;
 
   const newTokens = tokenize(newSubmissionText);
-  const otherTokenArrays = otherSubmissions.map((s) => tokenize(s));
-  const allDocs = [newTokens, ...otherTokenArrays];
+  if (newTokens.length === 0) return 0;
 
-  const vocabulary = new Set<string>();
-  for (const doc of allDocs) {
-    for (const t of doc) vocabulary.add(t.toLowerCase());
+  const otherTokensList = otherSubmissions
+    .filter(s => typeof s === 'string' && s.trim())
+    .map(tokenize)
+    .filter(toks => toks.length > 0);
+
+  if (otherTokensList.length === 0) return 0;
+
+  const allDocs = [newTokens, ...otherTokensList];
+
+  const sortedVocab = buildVocabulary(allDocs);
+  if (sortedVocab.length === 0) return 0;
+
+  const newVector = tfidfVector(newTokens, allDocs, sortedVocab);
+
+  let maxSimilarity = 0;
+
+  for (const otherTokens of otherTokensList) {
+    const otherVector = tfidfVector(otherTokens, allDocs, sortedVocab);
+    const similarity = cosineSimilarity(newVector, otherVector);
+    if (similarity > maxSimilarity) {
+      maxSimilarity = similarity;
+    }
   }
 
-  const newVec = tfidfVector(newTokens, allDocs, vocabulary);
-  let maxSim = 0;
+  // Scale to 0–100 and round
+  return Math.round(Math.min(100, maxSimilarity * 100));
+}
 
-  for (let i = 0; i < otherTokenArrays.length; i++) {
-    const otherVec = tfidfVector(otherTokenArrays[i], allDocs, vocabulary);
-    const sim = cosineSimilarity(newVec, otherVec);
-    if (sim > maxSim) maxSim = sim;
+// ──────────────────────────────────────────────
+// Vercel / Next.js API route handler (pages/api/plagiarism.ts)
+// ──────────────────────────────────────────────
+import type { NextApiRequest, NextApiResponse } from 'next';
+
+type ResponseData =
+  | { risk: number }
+  | { error: string };
+
+export default async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseData>
+) {
+  if (req.method !== 'POST') {
+    res.setHeader('Allow', ['POST']);
+    return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  // Convert similarity (0-1) to plagiarism risk percentage (0-100)
-  return Math.round(Math.min(100, maxSim * 100));
+  try {
+    const { newSubmissionText, otherSubmissions } = req.body;
+
+    if (
+      typeof newSubmissionText !== 'string' ||
+      !Array.isArray(otherSubmissions)
+    ) {
+      return res.status(400).json({
+        error: 'Invalid payload: newSubmissionText must be string, otherSubmissions must be string[]'
+      });
+    }
+
+    const risk = computePlagiarismRisk(newSubmissionText, otherSubmissions);
+
+    return res.status(200).json({ risk });
+  } catch (err: any) {
+    console.error('[plagiarism] Error:', err);
+    return res.status(500).json({ error: 'Internal computation error' });
+  }
 }
